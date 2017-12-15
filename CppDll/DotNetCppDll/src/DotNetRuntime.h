@@ -55,151 +55,36 @@ public:
 		return instance.get();
 	}
 
-	static void MakeInstance(const char* dotNetDllPath, const char* entrypointExecutable)
+	static void MakeInstance(char* dotNetDllPath)
 	{
-		instance = std::make_unique<DotNetRuntime>(dotNetDllPath, entrypointExecutable);
+		instance = std::make_unique<DotNetRuntime>(dotNetDllPath);
+	}
+
+	static void ReloadAppDomain(char* dotNetDllPath)
+	{
+		instance.reset(nullptr);
+		instance = std::make_unique<DotNetRuntime>(dotNetDllPath);
 	}
 
 	std::map<std::string, void*> DelegateMap;
 
-	DotNetRuntime(const char* dotNetDllPath, const char* entrypointExecutable)
+	DotNetRuntime(char* dotNetDllPath)
 	{
-		ExecuteManagedAssembly(entrypointExecutable, targetAppPath, dotNetDllPath);
+		ExecuteManagedAssembly(targetAppPath, dotNetDllPath);
 	}
 
 	DotNetRuntime(const DotNetRuntime& copy) = delete;
 
 	~DotNetRuntime()
 	{
+		ShutdownClr();
 	}
 
-	bool GetAbsolutePath(const char* path, std::string& absolutePath)
-	{
-		bool result = false;
 
-		char realPath[MAX_PATH];
-		if (GetFullPathNameA(path, MAX_PATH, realPath, NULL) && realPath[0] != '\0')
-		{
-			absolutePath.assign(realPath);
-			// realpath should return canonicalized path without the trailing slash
-			assert(absolutePath.back() != '/');
-
-			result = true;
-		}
-
-		return result;
-	}
-
-	bool GetDirectory(const char* absolutePath, std::string& directory)
-	{
-		directory.assign(absolutePath);
-		size_t lastSlash = directory.rfind('/');
-		if (lastSlash != std::string::npos)
-		{
-			directory.erase(lastSlash);
-			return true;
-		}
-
-		return false;
-	}
-
-	bool GetClrFilesAbsolutePath(const char* currentExePath, const char* clrFilesPath, std::string& clrFilesAbsolutePath)
-	{
-		std::string clrFilesRelativePath;
-		const char* clrFilesPathLocal = clrFilesPath;
-		if (clrFilesPathLocal == nullptr)
-		{
-			// There was no CLR files path specified, use the folder of the corerun/coreconsole
-			if (!GetDirectory(currentExePath, clrFilesRelativePath))
-			{
-				perror("Failed to get directory from argv[0]");
-				return false;
-			}
-
-			clrFilesPathLocal = clrFilesRelativePath.c_str();
-
-			// TODO: consider using an env variable (if defined) as a fall-back.
-			// The windows version of the corerun uses core_root env variable
-		}
-
-		if (!GetAbsolutePath(clrFilesPathLocal, clrFilesAbsolutePath))
-		{
-			perror("Failed to convert CLR files path to absolute path");
-			return false;
-		}
-
-		return true;
-	}
-
-	void AddFilesFromDirectoryToTpaList(const char* directory, std::string& tpaList)
-	{
-		const char * const tpaExtensions[] = {
-			".ni.dl",      // Probe for .ni.dll first so that it's preferred if ni and il coexist in the same dir
-			".dl",
-			".ni.exe",
-			".exe",
-		};
-
-		if (!(GetFileAttributesA(directory) & FILE_ATTRIBUTE_DIRECTORY))
-		{
-			return;
-		}
-
-		HANDLE hFind;
-		WIN32_FIND_DATAA FindFileData;
-
-		std::set<std::string> addedAssemblies;
-
-		// Walk the directory for each extension separately so that we first get files with .ni.dll extension,
-		// then files with .dll extension, etc.
-		for (int extIndex = 0; extIndex < sizeof(tpaExtensions) / sizeof(tpaExtensions[0]); extIndex++)
-		{
-			const char* ext = tpaExtensions[extIndex];
-			int extLength = strlen(ext);
-
-			std::string directoryToProbe = directory + std::string("/*") + ext;
-			// For all entries in the directory
-			if ((hFind = FindFirstFileA(directoryToProbe.c_str(), &FindFileData)) != INVALID_HANDLE_VALUE) {
-				do {
-					printf("%s\n", FindFileData.cFileName);
-				} while (FindNextFileA(hFind, &FindFileData));
-				FindClose(hFind);
-			}
-			do
-			{
-				std::string fullFilename;
-
-				fullFilename.append(directory);
-				fullFilename.append("/");
-				fullFilename.append(FindFileData.cFileName);
-
-
-				std::string filename(FindFileData.cFileName);
-
-				// Check if the extension matches the one we are looking for
-				int extPos = filename.length() - extLength;
-				if ((extPos <= 0) || (filename.compare(extPos, extLength, ext) != 0))
-				{
-					continue;
-				}
-
-				std::string filenameWithoutExt(filename.substr(0, extPos));
-
-				// Make sure if we have an assembly with multiple extensions present,
-				// we insert only one version of it.
-				if (addedAssemblies.find(filenameWithoutExt) == addedAssemblies.end())
-				{
-					addedAssemblies.insert(filenameWithoutExt);
-
-					tpaList.append(directory);
-					tpaList.append("/");
-					tpaList.append(filename);
-					tpaList.append(":");
-				}
-			} while (FindNextFileA(hFind, &FindFileData));
-			FindClose(hFind);
-		}
-	}
+	// variables
+	void* hostHandle;
+	unsigned int domainId;
+	
 
 	bool GetEntrypointExecutableAbsolutePath(std::string& entrypointExecutable)
 	{
@@ -215,6 +100,32 @@ public:
 		return true;
 	}
 
+	std::string CreateDllCopy(char* dotNetDllPath)
+	{
+		char currentDir[MAX_PATH];
+		GetCurrentDirectoryA(MAX_PATH, currentDir);
+		std::string path = std::string(currentDir) + "\\..\\tmp";
+		std::string t = std::string(dotNetDllPath);
+		t = t.substr(t.find_last_of("\\") + 1, t.length());
+		std::string newPath(path + "\\" + t);
+		if (CreateDirectoryA(path.c_str(), NULL) ||
+			ERROR_ALREADY_EXISTS == GetLastError())
+		{
+			// CopyFile(...)
+			std::ifstream  src(dotNetDllPath, std::ios::binary);
+			std::ofstream  dst(newPath, std::ios::binary);
+
+			dst << src.rdbuf();
+		}
+		else
+		{
+			// Failed to create directory.
+			printf("Failed to create dll directory\n");
+			return nullptr;
+		}
+		return newPath;
+	}
+
 	const char* GetEnvValueBoolean(const char* envVariable)
 	{
 		char* envValue = getenv(envVariable);
@@ -227,13 +138,12 @@ public:
 	}
 
 	int ExecuteManagedAssembly(
-		const char* currentExeAbsolutePath,
 		const char* clrFilesAbsolutePath,
-		const char* managedAssemblyAbsolutePath)
+		char* managedAssemblyAbsolutePath)
 	{
-		printf("currentExeAbsolutePath = %s\n", currentExeAbsolutePath);
-		printf("clrFilesAbsolutePath = %s\n", clrFilesAbsolutePath);
-		printf("managedAssemblyAbsolutePath = %s\n", managedAssemblyAbsolutePath);
+
+		std::string tmp = CreateDllCopy(managedAssemblyAbsolutePath);
+		managedAssemblyAbsolutePath = &tmp[0];
 
 		std::string coreClrDllPath(coreCLRInstallDirectory);
 		coreClrDllPath.append("/");
@@ -349,8 +259,7 @@ public:
 		coreclr_initialize_ptr initializeCoreCLR = (coreclr_initialize_ptr)GetProcAddress(coreclrLib, "coreclr_initialize");
 		coreclr_create_delegate_ptr createDelegateCoreCLR = (coreclr_create_delegate_ptr)GetProcAddress(coreclrLib, "coreclr_create_delegate");
 		coreclr_execute_assembly_ptr executeAssembly = (coreclr_execute_assembly_ptr)GetProcAddress(coreclrLib, "coreclr_execute_assembly");
-		coreclr_shutdown_2_ptr shutdownCoreCLR = (coreclr_shutdown_2_ptr)GetProcAddress(coreclrLib, "coreclr_shutdown_2");
-
+		
 		if (initializeCoreCLR == nullptr)
 		{
 			fprintf(stderr, "Function coreclr_initialize not found in the libcoreclr.so\n");
@@ -359,11 +268,6 @@ public:
 		else if (createDelegateCoreCLR == nullptr)
 		{
 			fprintf(stderr, "Function coreclr_create_delegate not found in the libcoreclr.so\n");
-			return -1;
-		}
-		else if (shutdownCoreCLR == nullptr)
-		{
-			fprintf(stderr, "Function coreclr_shutdown_2 not found in the libcoreclr.so\n");
 			return -1;
 		}
 		else if (executeAssembly == nullptr)
@@ -401,6 +305,7 @@ public:
 			"System.GC.Server",
 			"System.Globalization.Invariant",
 		};
+
 		const char *propertyValues[] = {
 			// TRUSTED_PLATFORM_ASSEMBLIES
 			trustedPlatformAssemblies,
@@ -416,8 +321,6 @@ public:
 			globalizationInvariant,
 		};
 
-		void* hostHandle;
-		unsigned int domainId;
 
 		std::string entryPointExecutablePath;
 		if (!GetEntrypointExecutableAbsolutePath(entryPointExecutablePath))
@@ -468,14 +371,43 @@ public:
 			return -1;
 		}
 
+		return 0;
+	}
+
+	int ShutdownClr()
+	{
+		std::string coreClrDllPath(coreCLRInstallDirectory);
+		coreClrDllPath.append("/");
+		coreClrDllPath.append(coreCLRDll);
+
+		if (coreClrDllPath.length() >= MAX_PATH)
+		{
+			fprintf(stderr, "Absolute path to libcoreclr.so too long\n");
+			return -1;
+		}
+		HMODULE coreclrLib = LoadLibraryExA(coreClrDllPath.c_str(), NULL, 0);
+		if (coreclrLib == nullptr)
+		{
+			fprintf(stderr, "dlopen failed to open the libcoreclr.so with error\n");
+			return -1;
+		}
+		coreclr_shutdown_2_ptr shutdownCoreCLR = (coreclr_shutdown_2_ptr)GetProcAddress(coreclrLib, "coreclr_shutdown_2");
+
+		if (shutdownCoreCLR == nullptr)
+		{
+			fprintf(stderr, "Function coreclr_shutdown_2 not found in the libcoreclr.so\n");
+			return -1;
+		}
+
 		int latchedExitCode = 0;
-		st = shutdownCoreCLR(hostHandle, domainId, &latchedExitCode);
+		int st = shutdownCoreCLR(hostHandle, domainId, &latchedExitCode);
 		if (!SUCCEEDED(st))
 		{
 			fprintf(stderr, "coreclr_shutdown failed - status: 0x%08x\n", st);
 			return -1;
 		}
-		return 0;
+		printf("CLR shutdown \n");
+		return latchedExitCode;
 	}
 
 	int AddDelegates(int domainId, void* hostHandle, coreclr_create_delegate_ptr createDelegateCoreCLR)
@@ -485,7 +417,6 @@ public:
 		ret += AddDelegate("Character.CreateCharacter", domainId, hostHandle, createDelegateCoreCLR);
 		ret += AddDelegate("Character.TakeDamage", domainId, hostHandle, createDelegateCoreCLR);
 		ret += AddDelegate("Character.Heal", domainId, hostHandle, createDelegateCoreCLR);
-		ret += AddDelegate("Character.Test", domainId, hostHandle, createDelegateCoreCLR);
 		return (ret < 0) ? -1 : 0;
 	}
 
@@ -909,31 +840,7 @@ private:
 
 
 
-	std::string CreateDllCopy(char* dotNetDllPath)
-	{
-		char currentDir[MAX_PATH];
-		GetCurrentDirectory(MAX_PATH, currentDir);
-		std::string path = std::string(currentDir) + "\\..\\tmp";
-		std::string t = std::string(dotNetDllPath);
-		t = t.substr(t.find_last_of("\\") + 1, t.length());
-		std::string newPath(path + "\\" + t);
-		if (CreateDirectory(path.c_str(), NULL) ||
-			ERROR_ALREADY_EXISTS == GetLastError())
-		{
-			// CopyFile(...)
-			std::ifstream  src(dotNetDllPath, std::ios::binary);
-			std::ofstream  dst(newPath, std::ios::binary);
-
-			dst << src.rdbuf();
-		}
-		else
-		{
-			// Failed to create directory.
-			printf("Failed to create dll directory\n");
-			return nullptr;
-		}
-		return newPath;
-	}
+	
 
 	int DestroyDotNetRuntime()
 	{

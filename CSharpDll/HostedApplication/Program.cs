@@ -16,24 +16,18 @@ namespace HostedApplication
 
         static void CreateCharacter(int id)
         {
-            //APIImport.ConstructCharacter(id, CharacterMaxLife, CharacterMaxMana);     
+            APIImport.ConstructCharacter(id, CharacterMaxLife, CharacterMaxMana);     
         }
 
         static void TakeDamage(int id, int value)
         { 
-            //APIImport.CharacterRemoveLife(id, value);                    
+            APIImport.CharacterRemoveLife(id, value);                    
         }     
               
         static void Heal(int id)   
         { 
-            //APIImport.CharacterAddLife(id, HealPower);
-            //APIImport.CharacterRemoveMana(id, HealManaCost);           
-        }
-        static void Test()
-        {
-            // Console.WriteLine("TEST");
-            //APIImport.TestReceive();
-            //return 666;
+            APIImport.CharacterAddLife(id, HealPower);
+            APIImport.CharacterRemoveMana(id, HealManaCost);           
         }
 
     };
